@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gke-fastapi-prod-ing
+  namespace: gke-fastapi-prod
+  annotations:
+    # 4–5 lines explanation:
+    # This uses GKE Ingress controller (Google Cloud Load Balancer).
+    # For production, consider ManagedCertificate + Cloud Armor + HTTPS only.
+    # You can also switch to Gateway API if preferred for newer setups.
+    kubernetes.io/ingress.class: "gce"
+spec:
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gke-fastapi-prod-svc
+                port:
+                  number: 80

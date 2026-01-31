@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gke-fastapi-prod
+  namespace: gke-fastapi-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gke-fastapi-prod
+  template:
+    metadata:
+      labels:
+        app: gke-fastapi-prod
+    spec:
+      serviceAccountName: gke-fastapi-prod-sa
+      containers:
+        - name: app
+          image: REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/IMAGE_NAME:TAG
+          ports:
+            - containerPort: 8080
+          env:
+            - name: REQUIRE_SECRET_FILE
+              value: "true"
+            - name: APP_SECRET_FILE
+              value: "/var/secrets/app/API_KEY"
+
+          # 4–5 lines explanation:
+          # Readiness = “can receive traffic now?”; we check the secret file exists.
+          # Liveness = “is the process alive?”; should remain lightweight and stable.
+          # Probes protect rollouts, autoscaling, and prevent blackholing traffic.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          # 4–5 lines explanation:
+          # Requests = guaranteed resources for scheduling.
+          # Limits = hard caps to protect node stability.
+          # Choose small defaults; tune using metrics in production.
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+
+          volumeMounts:
+            - name: secrets-store
+              mountPath: "/var/secrets/app"
+              readOnly: true
+
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: "gke-fastapi-prod-sm"

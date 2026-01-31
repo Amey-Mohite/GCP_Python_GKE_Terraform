@@ -1,0 +1,68 @@
+name: deploy
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REGION: ${{ secrets.GCP_REGION }}
+      GAR_REPO: ${{ secrets.GAR_REPO }}
+      IMAGE_NAME: ${{ secrets.IMAGE_NAME }}
+      CLUSTER: ${{ secrets.GKE_CLUSTER }}
+      LOCATION: ${{ secrets.GKE_LOCATION }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 4–5 lines explanation:
+      # Keyless auth: GitHub OIDC token -> Workload Identity Provider -> short-lived creds.
+      # No JSON keys stored in GitHub.
+      # The bound Google SA must have least-privilege roles for GAR + GKE deploy.
+      - id: auth
+        name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          SHA="${GITHUB_SHA}"
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:${SHA}"
+          echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
+
+          docker build -t "${IMAGE}" .
+          docker push "${IMAGE}"
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials "${CLUSTER}" --location "${LOCATION}" --project "${PROJECT_ID}"
+
+      - name: Deploy to GKE
+        run: |
+          # Update deployment image without templating tools:
+          # This keeps the repo simple and avoids Helm/Kustomize until you need them.
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/serviceaccount.yaml
+          kubectl apply -f k8s/secretproviderclass.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/deployment.yaml
+
+          kubectl -n gke-fastapi-prod set image deployment/gke-fastapi-prod app="${IMAGE}"
+          kubectl -n gke-fastapi-prod rollout status deployment/gke-fastapi-prod
