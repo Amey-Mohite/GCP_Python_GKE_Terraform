@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gke-fastapi-prod
+  namespace: gke-fastapi-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gke-fastapi-prod
+  template:
+    metadata:
+      labels:
+        app: gke-fastapi-prod
+    spec:
+      serviceAccountName: gke-fastapi-prod-sa
+
+      containers:
+        - name: gke-fastapi-prod
+          image: acringest.azurecr.io/pipelines-data
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+
+          # These are created/updated by the initContainer (overlay)
+          env:
+            - name: ENV
+              valueFrom:
+                secretKeyRef:
+                  name: secret1
+                  key: env-var
+            - name: SECRET1
+              valueFrom:
+                secretKeyRef:
+                  name: secret1
+                  key: first-secret
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

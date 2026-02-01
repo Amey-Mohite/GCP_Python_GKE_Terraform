@@ -1,68 +1,104 @@
-name: deploy
+name: Deploy to GKE
 
 on:
-  push:
-    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.2.3 or sha)"
+        required: true
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - nonproduction
+          - production
 
-permissions:
-  id-token: write
-  contents: read
+run-name: Deploy ${{ inputs.tag }} to ${{ inputs.environment }} on GCP
+
+# Non-sensitive settings belong in GitHub Variables (vars)
+env: 
+  GKE_PROJECT_ID: ${{ vars.GKE_PROJECT }} # gcp-deploy-test-486014
+  GKE_CLUSTER: ${{ vars.GKE_CLUSTER_NAME }} # 
+  GKE_REGION: ${{ vars.GKE_CLUSTER_REGION }} # europe-west2
+
+  # JSON keys are sensitive; keep them ONLY in GitHub Secrets
+  GKE_SERVICE_ACCOUNT_KEY: ${{ secrets.GKE_SERVICE_ACCOUNT_KEY }}
+  GAR_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_ARTIFACT_REGISTRY_SERVICE_ACCOUNT_KEY }}
+
+  GAR_HOST: ${{ vars.GCP_ARTIFACT_REGISTRY_REGION }}-docker.pkg.dev # europe-west2
+  GAR_PROJECT_ID: ${{ vars.GCP_ARTIFACT_REGISTRY_PROJECT_ID }} # gcp-deploy-test-486014
+  GAR_REPO: ${{ vars.GCP_ARTIFACT_REGISTRY_REPO }}     # GCP_Python_GKE_Terraform   
+  GAR_IMAGE: ${{ vars.GCP_ARTIFACT_REGISTRY_IMAGE }} # fastapiapp
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      REGION: ${{ secrets.GCP_REGION }}
-      GAR_REPO: ${{ secrets.GAR_REPO }}
-      IMAGE_NAME: ${{ secrets.IMAGE_NAME }}
-      CLUSTER: ${{ secrets.GKE_CLUSTER }}
-      LOCATION: ${{ secrets.GKE_LOCATION }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
 
     steps:
-      - name: Checkout
+      - name: Checkout sources at tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
-      # 4–5 lines explanation:
-      # Keyless auth: GitHub OIDC token -> Workload Identity Provider -> short-lived creds.
-      # No JSON keys stored in GitHub.
-      # The bound Google SA must have least-privilege roles for GAR + GKE deploy.
-      - id: auth
-        name: Authenticate to Google Cloud (WIF)
+      # ---- Auth for Artifact Registry (Docker push)
+      - name: Authenticate to GCP (Artifact Registry)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          credentials_json: ${{ env.GAR_SERVICE_ACCOUNT_KEY }}
 
-      - name: Setup gcloud
+      - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure Docker auth for Artifact Registry
+      - name: Docker auth for Artifact Registry
         run: |
-          gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
+          gcloud auth configure-docker "${{ env.GAR_HOST }}" --quiet
 
-      - name: Build and push image
+      - name: Build and push Docker image (tag = input tag)
+        env:
+          DOCKER_BUILDKIT: 1
         run: |
-          SHA="${GITHUB_SHA}"
-          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:${SHA}"
+          IMAGE="${{ env.GAR_HOST }}/${{ env.GAR_PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.GAR_IMAGE }}:${{ inputs.tag }}"
           echo "IMAGE=${IMAGE}" >> $GITHUB_ENV
 
           docker build -t "${IMAGE}" .
           docker push "${IMAGE}"
 
+      # ---- Auth for GKE + deploy
+      # If you want, you can reuse the SAME SA key for both GAR and GKE
+      # and remove this second auth step. Keeping it separate is OK too.
+      - name: Authenticate to GCP (GKE)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ env.GKE_SERVICE_ACCOUNT_KEY }}
+
       - name: Get GKE credentials
-        run: |
-          gcloud container clusters get-credentials "${CLUSTER}" --location "${LOCATION}" --project "${PROJECT_ID}"
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          project_id: ${{ env.GKE_PROJECT_ID }}
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_REGION }}
 
-      - name: Deploy to GKE
+      - name: Install kustomize
         run: |
-          # Update deployment image without templating tools:
-          # This keeps the repo simple and avoids Helm/Kustomize until you need them.
-          kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/serviceaccount.yaml
-          kubectl apply -f k8s/secretproviderclass.yaml
-          kubectl apply -f k8s/service.yaml
-          kubectl apply -f k8s/deployment.yaml
+          curl -sSL https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize_linux_amd64 \
+            -o /usr/local/bin/kustomize
+          chmod +x /usr/local/bin/kustomize
+          kustomize version
 
-          kubectl -n gke-fastapi-prod set image deployment/gke-fastapi-prod app="${IMAGE}"
-          kubectl -n gke-fastapi-prod rollout status deployment/gke-fastapi-prod
+      - name: Render manifests via kustomize (set image to input tag)
+        run: |
+          cd ./deployment/gcp
+
+          # This is your pattern: replace the placeholder image with the real GAR image:tag
+          kustomize edit set image acringest.azurecr.io/pipelines-data="${IMAGE}"
+
+          kustomize build . > ../manifests.yaml
+          echo "---- Rendered manifests ----"
+          cat ../manifests.yaml
+          kubectl apply -f ../../manifests.yaml
+
+          kubectl rollout status deployment/gke-fastapi-prod -n gke-fastapi-prod

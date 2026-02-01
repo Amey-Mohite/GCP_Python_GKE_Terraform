@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gke-fastapi-prod
+  namespace: gke-fastapi-prod
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: fetch-secrets
+          image: europe-west2-docker.pkg.dev/artifact-registry-kp925-mf47/core/gcp-init:1.0.0
+          env:
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "gcp-deploy-test-486014"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              /scripts/secrets.sh gke-fastapi-prod secret1 env-var first-secret

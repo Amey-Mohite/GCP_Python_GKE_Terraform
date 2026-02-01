@@ -3,5 +3,4 @@ kind: Namespace
 metadata:
   name: gke-fastapi-prod
   labels:
-    # Simple label for grouping and policy targeting.
     app.kubernetes.io/name: gke-fastapi-prod
